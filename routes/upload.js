@@ -64,7 +64,7 @@ const upload = multer({
  *               image:
  *                 type: string
  *                 format: binary
- *                 description: Image file (max 5MB, formats: jpeg, jpg, png, gif, webp)
+ *                 description: "Image file (max 5MB, formats: jpeg, jpg, png, gif, webp)"
  *     responses:
  *       200:
  *         description: File uploaded successfully
@@ -135,7 +135,7 @@ router.post('/single', upload.single('image'), (req, res) => {
  *                 items:
  *                   type: string
  *                   format: binary
- *                 description: Image files (max 10 files, each max 5MB, formats: jpeg, jpg, png, gif, webp)
+ *                 description: "Image files (max 10 files, each max 5MB, formats: jpeg, jpg, png, gif, webp)"
  *     responses:
  *       200:
  *         description: Files uploaded successfully

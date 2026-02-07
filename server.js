@@ -165,18 +165,28 @@ const initializeDatabase = async () => {
       CREATE INDEX IF NOT EXISTS idx_products_stock_status ON products(stock_status);
       CREATE INDEX IF NOT EXISTS idx_product_features_product_id ON product_features(product_id);
 
+      -- Users Table
+      CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        first_name VARCHAR(100) NOT NULL,
+        last_name VARCHAR(100) NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        phone VARCHAR(20) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
       -- Orders and Payment Tables
       CREATE TABLE IF NOT EXISTS orders (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         order_number VARCHAR(50) UNIQUE NOT NULL,
-        first_name VARCHAR(100) NOT NULL,
-        last_name VARCHAR(100) NOT NULL,
-        email VARCHAR(255) NOT NULL,
-        phone VARCHAR(20) NOT NULL,
+        user_id UUID REFERENCES users(id) ON DELETE SET NULL,
         total_price DECIMAL(10, 2) NOT NULL,
         kdv DECIMAL(10, 2) NOT NULL,
         grand_total DECIMAL(10, 2) NOT NULL,
-        status VARCHAR(20) DEFAULT 'pending',
+        status VARCHAR(20) DEFAULT 'order_received',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -194,10 +204,6 @@ const initializeDatabase = async () => {
       CREATE TABLE IF NOT EXISTS payment_info (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-        card_number VARCHAR(20) NOT NULL,
-        card_name VARCHAR(255) NOT NULL,
-        expiry_date VARCHAR(10) NOT NULL,
-        cvv VARCHAR(10) NOT NULL,
         payment_status VARCHAR(20) DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -205,7 +211,7 @@ const initializeDatabase = async () => {
       CREATE TABLE IF NOT EXISTS order_items (
         id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-        product_id UUID REFERENCES products(id) ON DELETE SET NULL,
+        product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
         product_name VARCHAR(255) NOT NULL,
         product_price DECIMAL(10, 2) NOT NULL,
         quantity INTEGER NOT NULL,
@@ -214,16 +220,55 @@ const initializeDatabase = async () => {
       );
 
       CREATE INDEX IF NOT EXISTS idx_orders_order_number ON orders(order_number);
-      CREATE INDEX IF NOT EXISTS idx_orders_email ON orders(email);
       CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+      CREATE TABLE IF NOT EXISTS order_status_history (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        old_status VARCHAR(20),
+        new_status VARCHAR(20) NOT NULL,
+        changed_by VARCHAR(255),
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS order_statuses (
+        id SERIAL PRIMARY KEY,
+        value VARCHAR(50) UNIQUE NOT NULL,
+        name VARCHAR(100) NOT NULL,
+        name_en VARCHAR(100) NOT NULL,
+        color VARCHAR(20),
+        display_order INTEGER DEFAULT 0,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE INDEX IF NOT EXISTS idx_delivery_addresses_order_id ON delivery_addresses(order_id);
       CREATE INDEX IF NOT EXISTS idx_payment_info_order_id ON payment_info(order_id);
       CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
       CREATE INDEX IF NOT EXISTS idx_order_items_product_id ON order_items(product_id);
+      CREATE INDEX IF NOT EXISTS idx_order_status_history_order_id ON order_status_history(order_id);
     `;
     
     await pool.query(schema);
     console.log('✅ Database tables created');
+    
+    // Insert default order statuses if they don't exist
+    try {
+      await pool.query(`
+        INSERT INTO order_statuses (value, name, name_en, color, display_order) VALUES
+          ('order_received', 'Sipariş Alındı', 'Order Received', 'blue', 1),
+          ('preparing', 'Hazırlanıyor', 'Preparing', 'orange', 2),
+          ('shipped', 'Kargoya Verildi', 'Shipped', 'cyan', 3),
+          ('returned', 'İade Edildi', 'Returned', 'purple', 4),
+          ('cancelled', 'İptal', 'Cancelled', 'red', 5),
+          ('completed', 'Tamamlandı', 'Completed', 'green', 6)
+        ON CONFLICT (value) DO NOTHING
+      `);
+      console.log('✅ Default order statuses inserted');
+    } catch (statusErr) {
+      console.log('⚠️ Note on order statuses:', statusErr.message);
+    }
     
     // Add is_deleted columns if they don't exist (migration for existing databases)
     try {
@@ -291,9 +336,108 @@ const initializeDatabase = async () => {
           ) THEN
             ALTER TABLE products ADD COLUMN reviews JSONB;
           END IF;
+          
+          -- Create order_status_history table if it doesn't exist
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_name = 'order_status_history'
+          ) THEN
+            CREATE TABLE order_status_history (
+              id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+              order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+              old_status VARCHAR(20),
+              new_status VARCHAR(20) NOT NULL,
+              changed_by VARCHAR(255),
+              notes TEXT,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_order_status_history_order_id ON order_status_history(order_id);
+          END IF;
+          
+          -- Create users table if it doesn't exist
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_name = 'users'
+          ) THEN
+            CREATE TABLE users (
+              id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+              first_name VARCHAR(100) NOT NULL,
+              last_name VARCHAR(100) NOT NULL,
+              email VARCHAR(255) UNIQUE NOT NULL,
+              phone VARCHAR(20) NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+          END IF;
+          
+          -- Add user_id to orders table if it doesn't exist (only if orders table exists)
+          IF EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_name = 'orders'
+          ) THEN
+            IF NOT EXISTS (
+              SELECT 1 FROM information_schema.columns 
+              WHERE table_name = 'orders' AND column_name = 'user_id'
+            ) THEN
+              ALTER TABLE orders ADD COLUMN user_id UUID REFERENCES users(id) ON DELETE SET NULL;
+              CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
+            END IF;
+          END IF;
+          
+          -- Remove old columns from orders table if they exist (migration from old schema)
+          IF EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_name = 'orders'
+          ) THEN
+            -- Remove first_name if user_id exists
+            IF EXISTS (
+              SELECT 1 FROM information_schema.columns 
+              WHERE table_name = 'orders' AND column_name = 'user_id'
+            ) THEN
+              IF EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'orders' AND column_name = 'first_name'
+              ) THEN
+                ALTER TABLE orders DROP COLUMN IF EXISTS first_name;
+                ALTER TABLE orders DROP COLUMN IF EXISTS last_name;
+                ALTER TABLE orders DROP COLUMN IF EXISTS email;
+                ALTER TABLE orders DROP COLUMN IF EXISTS phone;
+              END IF;
+            END IF;
+          END IF;
+          
+          
+          -- Create order_statuses table if it doesn't exist
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_name = 'order_statuses'
+          ) THEN
+            CREATE TABLE order_statuses (
+              id SERIAL PRIMARY KEY,
+              value VARCHAR(50) UNIQUE NOT NULL,
+              name VARCHAR(100) NOT NULL,
+              name_en VARCHAR(100) NOT NULL,
+              color VARCHAR(20),
+              display_order INTEGER DEFAULT 0,
+              is_active BOOLEAN DEFAULT TRUE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            -- Insert default statuses
+            INSERT INTO order_statuses (value, name, name_en, color, display_order) VALUES
+              ('order_received', 'Sipariş Alındı', 'Order Received', 'blue', 1),
+              ('preparing', 'Hazırlanıyor', 'Preparing', 'orange', 2),
+              ('shipped', 'Kargoya Verildi', 'Shipped', 'cyan', 3),
+              ('returned', 'İade Edildi', 'Returned', 'purple', 4),
+              ('cancelled', 'İptal', 'Cancelled', 'red', 5),
+              ('completed', 'Tamamlandı', 'Completed', 'green', 6)
+            ON CONFLICT (value) DO NOTHING;
+          END IF;
         END $$;
       `);
-      console.log('✅ Migration: Extended product columns added if needed');
+      console.log('✅ Migration: Extended product columns, order_status_history, users table, user_id column and order_statuses table added if needed');
     } catch (migrationErr) {
       console.log('⚠️ Migration note:', migrationErr.message);
     }

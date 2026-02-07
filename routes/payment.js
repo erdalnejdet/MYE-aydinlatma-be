@@ -212,7 +212,8 @@ router.post('/', async (req, res) => {
       });
     }
     
-    // Validate paymentInfo
+    // Validate paymentInfo (card details are processed but not stored for security)
+    // Note: Card information is validated but not saved to database for PCI-DSS compliance
     if (!paymentInfo.cardNumber || !paymentInfo.cardName || 
         !paymentInfo.expiryDate || !paymentInfo.cvv) {
       await client.query('ROLLBACK');
@@ -221,6 +222,9 @@ router.post('/', async (req, res) => {
         error: 'Missing required paymentInfo fields: cardNumber, cardName, expiryDate, cvv'
       });
     }
+    
+    // Security: Card information is validated but NOT stored in database
+    // Only payment status is saved for tracking purposes
     
     // Validate cartItems
     if (!Array.isArray(cartItems) || cartItems.length === 0) {
@@ -234,27 +238,68 @@ router.post('/', async (req, res) => {
     // Generate unique order number
     const orderNumber = generateOrderNumber();
     
-    // Create order
+    // Check if user exists by email, if not create one
+    let userResult = await client.query(`
+      SELECT id FROM users WHERE email = $1
+    `, [personalInfo.email]);
+    
+    let userId;
+    if (userResult.rows.length === 0) {
+      // Create new user
+      const newUserResult = await client.query(`
+        INSERT INTO users (first_name, last_name, email, phone)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+      `, [
+        personalInfo.firstName,
+        personalInfo.lastName,
+        personalInfo.email,
+        personalInfo.phone
+      ]);
+      userId = newUserResult.rows[0].id;
+    } else {
+      // Update existing user info if changed
+      userId = userResult.rows[0].id;
+      await client.query(`
+        UPDATE users 
+        SET first_name = $1, last_name = $2, phone = $3, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $4
+      `, [
+        personalInfo.firstName,
+        personalInfo.lastName,
+        personalInfo.phone,
+        userId
+      ]);
+    }
+    
+    // Create order with user_id
     const orderResult = await client.query(`
       INSERT INTO orders (
-        order_number, first_name, last_name, email, phone,
-        total_price, kdv, grand_total, status
+        order_number, user_id, total_price, kdv, grand_total, status
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING *
     `, [
       orderNumber,
-      personalInfo.firstName,
-      personalInfo.lastName,
-      personalInfo.email,
-      personalInfo.phone,
+      userId,
       totalPrice,
       kdv,
       grandTotal,
-      'pending'
+      'order_received'
     ]);
     
     const order = orderResult.rows[0];
+    
+    // Create initial status history entry
+    await client.query(`
+      INSERT INTO order_status_history (order_id, old_status, new_status, changed_by, notes)
+      VALUES ($1, NULL, $2, $3, $4)
+    `, [
+      order.id,
+      'order_received',
+      'system',
+      'Sipariş oluşturuldu'
+    ]);
     
     // Create delivery address
     await client.query(`
@@ -270,23 +315,28 @@ router.post('/', async (req, res) => {
       deliveryAddress.postalCode || null
     ]);
     
-    // Create payment info
+    // Create payment info (only payment status, NO card data stored)
+    // Security: Card numbers, CVV, expiry dates, and card names are NOT stored for PCI-DSS compliance
+    // Payment info is validated but immediately discarded after processing
     await client.query(`
       INSERT INTO payment_info (
-        order_id, card_number, card_name, expiry_date, cvv, payment_status
+        order_id, payment_status
       )
-      VALUES ($1, $2, $3, $4, $5, $6)
+      VALUES ($1, $2)
     `, [
       order.id,
-      paymentInfo.cardNumber,
-      paymentInfo.cardName,
-      paymentInfo.expiryDate,
-      paymentInfo.cvv,
       'completed'
     ]);
     
-    // Create order items
+    // Create order items and update stock quantities
     for (const item of cartItems) {
+      // Parse product_id (can be string or number)
+      const productId = item.id ? parseInt(item.id) : null;
+      
+      // Use currentPrice if available, otherwise fallback to price
+      const productPrice = item.currentPrice || item.price || 0;
+      
+      // Insert order item
       await client.query(`
         INSERT INTO order_items (
           order_id, product_id, product_name, product_price, quantity, product_image
@@ -294,19 +344,63 @@ router.post('/', async (req, res) => {
         VALUES ($1, $2, $3, $4, $5, $6)
       `, [
         order.id,
-        item.id || null, // product_id can be null if product doesn't exist
+        productId, // product_id as integer
         item.name,
-        item.price,
+        productPrice,
         item.quantity,
         item.image || null
       ]);
+      
+      // Update stock quantity if product_id exists
+      if (productId) {
+        // Get current stock quantity
+        const productResult = await client.query(`
+          SELECT stock_quantity, stock_status 
+          FROM products 
+          WHERE id = $1 AND is_deleted = FALSE
+        `, [productId]);
+        
+        if (productResult.rows.length > 0) {
+          const currentStock = parseInt(productResult.rows[0].stock_quantity) || 0;
+          const orderQuantity = parseInt(item.quantity) || 0;
+          
+          // Check if enough stock available
+          if (currentStock < orderQuantity) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+              success: false,
+              error: `Yetersiz stok: ${item.name} için ${currentStock} adet mevcut, ${orderQuantity} adet talep edildi.`
+            });
+          }
+          
+          // Calculate new stock quantity
+          const newStock = currentStock - orderQuantity;
+          
+          // Determine new stock status
+          let newStockStatus = 'in_stock';
+          if (newStock === 0) {
+            newStockStatus = 'out_of_stock';
+          } else if (newStock <= 10) {
+            newStockStatus = 'low_stock';
+          }
+          
+          // Update product stock
+          await client.query(`
+            UPDATE products 
+            SET 
+              stock_quantity = $1,
+              stock_status = $2,
+              updated_at = CURRENT_TIMESTAMP
+            WHERE id = $3 AND is_deleted = FALSE
+          `, [newStock, newStockStatus, item.id]);
+          
+          console.log(`✅ Stok güncellendi: ${item.name} - Eski: ${currentStock}, Yeni: ${newStock}, Durum: ${newStockStatus}`);
+        }
+      }
     }
     
-    // Update order status to completed
-    await client.query(`
-      UPDATE orders SET status = 'completed', updated_at = CURRENT_TIMESTAMP
-      WHERE id = $1
-    `, [order.id]);
+    // Order status is already set to 'order_received' when created
+    // Status will be updated through the order management system
     
     await client.query('COMMIT');
     

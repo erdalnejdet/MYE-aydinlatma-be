@@ -322,8 +322,9 @@ const options = {
             },
             status: {
               type: 'string',
-              enum: ['pending', 'completed', 'cancelled'],
-              example: 'completed',
+              enum: ['order_received', 'preparing', 'shipped', 'returned', 'cancelled', 'completed'],
+              example: 'order_received',
+              description: 'Order status: order_received (Sipariş Alındı), preparing (Hazırlanıyor), shipped (Kargoya Verildi), returned (İade Edildi), cancelled (İptal), completed (Tamamlandı)',
             },
             deliveryAddress: {
               type: 'object',
@@ -349,21 +350,15 @@ const options = {
             paymentInfo: {
               type: 'object',
               properties: {
-                cardNumber: {
-                  type: 'string',
-                  example: '1234 5678 9012 3456',
-                },
                 cardName: {
                   type: 'string',
                   example: 'AHMET YILMAZ',
-                },
-                expiryDate: {
-                  type: 'string',
-                  example: '12/28',
+                  description: 'Card holder name (for display purposes only)',
                 },
                 paymentStatus: {
                   type: 'string',
                   example: 'completed',
+                  description: 'Payment status',
                 },
               },
             },

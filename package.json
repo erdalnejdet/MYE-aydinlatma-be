@@ -6,7 +6,11 @@
     "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "init-brands": "node scripts/init-brands.js",
-    "seed-mock-data": "node scripts/seed-mock-data.js"
+    "seed-mock-data": "node scripts/seed-mock-data.js",
+    "migrate-orders": "node scripts/migrate-orders-payment.js",
+    "check-tables": "node scripts/check-tables.js",
+    "migrate-remove-card-info": "node scripts/migrate-remove-card-info.js",
+    "migrate-remove-card-name": "node scripts/migrate-remove-card-name.js"
   },
   "keywords": [],
   "author": "",
